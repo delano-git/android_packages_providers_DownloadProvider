@@ -23,15 +23,18 @@ import static android.provider.Downloads.Impl.ALL_DOWNLOADS_CONTENT_URI;
 
 import static com.android.providers.downloads.Constants.TAG;
 
+import android.Manifest;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
 import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Process;
 import android.provider.DocumentsContract;
 import android.provider.Downloads.Impl.RequestHeaders;
@@ -92,7 +95,7 @@ public class OpenHelper {
                     final String ownerPackageName = getCursorString(cursor,
                             MediaStore.Downloads.OWNER_PACKAGE_NAME);
                     final int ownerUid = getPackageUid(context, ownerPackageName);
-                    if (ownerUid > 0) {
+                    if (ownerUid > 0 && canRequestInstalls(context, ownerUid)) {
                         intent.putExtra(Intent.EXTRA_ORIGINATING_UID, ownerUid);
                     }
                 }
@@ -171,7 +174,7 @@ public class OpenHelper {
             try {
                 if (cursor.moveToFirst()) {
                     final int uid = cursor.getInt(cursor.getColumnIndexOrThrow(Constants.UID));
-                    if (uid != Process.myUid()) {
+                    if (uid != Process.myUid() && canRequestInstalls(context, uid)) {
                         return uid;
                     }
                 }
@@ -180,6 +183,43 @@ public class OpenHelper {
             }
         }
         return PackageInstaller.SessionParams.UID_UNKNOWN;
+    }
+
+    /**
+     * The package installer refuses an install outright when the originating app can't request
+     * installs, even though the user opened the APK from Downloads. That happens when the file
+     * was copied there by an app like the Files storage provider, so only name an originating app
+     * that could request the install itself. Otherwise the installer treats the APK as coming
+     * from an unknown source and lets the user decide.
+     */
+    private static boolean canRequestInstalls(Context context, int uid) {
+        final PackageManager pm = context.getPackageManager();
+        final String[] packageNames = pm.getPackagesForUid(uid);
+        if (packageNames == null) {
+            return false;
+        }
+        for (String packageName : packageNames) {
+            final PackageInfo info;
+            try {
+                info = pm.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS);
+            } catch (PackageManager.NameNotFoundException e) {
+                continue;
+            }
+            if (info.applicationInfo != null
+                    && info.applicationInfo.targetSdkVersion < Build.VERSION_CODES.O) {
+                return true;
+            }
+            if (info.requestedPermissions == null) {
+                continue;
+            }
+            for (String permission : info.requestedPermissions) {
+                if (Manifest.permission.REQUEST_INSTALL_PACKAGES.equals(permission)
+                        || Manifest.permission.INSTALL_PACKAGES.equals(permission)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static int getPackageUid(Context context, String packageName) {
